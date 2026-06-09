@@ -170,7 +170,6 @@ func signSSHUsage(out io.Writer) {
 	fmt.Fprintln(out, "  -agent-sock path")
 	fmt.Fprintln(out, "  -ca-crt path")
 	fmt.Fprintln(out, "  -duration duration")
-	fmt.Fprintln(out, "  -force")
 	fmt.Fprintln(out, "  -groups group1,group2")
 	fmt.Fprintln(out, "  -in-pub path")
 	fmt.Fprintln(out, "  -name name")
@@ -188,18 +187,11 @@ func keyPublic(args []string) error {
 	in := fs.String("in", "", "Required: private key path, or - for stdin")
 	out := fs.String("out", "", "Required: public key output path, or - for stdout")
 	password := fs.String("password", "", "Password source for encrypted CA keys: env:NAME or file:PATH")
-	force := fs.Bool("force", false, "Overwrite output file if it exists")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *in == "" {
-		return fmt.Errorf("-in is required")
-	}
-	if *out == "" {
-		return fmt.Errorf("-out is required")
-	}
-	if *in == stdioPath && *out == stdioPath {
-		return fmt.Errorf("-in and -out cannot both be %q", stdioPath)
+	if err := validateInOut(*in, *out); err != nil {
+		return err
 	}
 
 	raw, err := readPath(*in)
@@ -210,7 +202,7 @@ func keyPublic(args []string) error {
 	if err != nil {
 		return err
 	}
-	return writePath(*out, pub, 0600, *force)
+	return writePath(*out, pub, 0600)
 }
 
 func signSSH(args []string) error {
@@ -240,7 +232,6 @@ func signSSH(args []string) error {
 	groupsFlag := fs.String("groups", "", "Optional: comma separated list of groups")
 	ip := fs.String("ip", "", "Deprecated, see -networks")
 	subnets := fs.String("subnets", "", "Deprecated, see -unsafe-networks")
-	force := fs.Bool("force", false, "Overwrite output files if they exist")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -285,6 +276,9 @@ func signSSH(args []string) error {
 	}
 	if *outCertPath == "" {
 		*outCertPath = *name + ".crt"
+	}
+	if *inPubPath == "" && *outKeyPath != stdioPath && *outKeyPath == *outCertPath {
+		return fmt.Errorf("-out-key and -out-crt must be different paths")
 	}
 
 	version := cert.Version(*versionFlag)
@@ -335,14 +329,12 @@ func signSSH(args []string) error {
 		}
 	}
 
-	if !*force {
-		if err := refuseExisting(*outCertPath, "cert"); err != nil {
+	if err := refuseExisting(*outCertPath, "cert"); err != nil {
+		return err
+	}
+	if *inPubPath == "" {
+		if err := refuseExisting(*outKeyPath, "key"); err != nil {
 			return err
-		}
-		if *inPubPath == "" {
-			if err := refuseExisting(*outKeyPath, "key"); err != nil {
-				return err
-			}
 		}
 	}
 
@@ -388,16 +380,24 @@ func signSSH(args []string) error {
 	if err != nil {
 		return fmt.Errorf("error while signing with ssh-agent: %w", err)
 	}
+	if !nc.CheckSignature(caCert.PublicKey()) {
+		return fmt.Errorf("produced certificate signature does not verify against CA public key")
+	}
 	certPEM, err := nc.MarshalPEM()
 	if err != nil {
 		return fmt.Errorf("error while marshalling certificate: %w", err)
 	}
 	if *inPubPath == "" {
-		if err := writePath(*outKeyPath, cert.MarshalPrivateKeyToPEM(caCert.Curve(), rawPriv), 0600, *force); err != nil {
+		if err := writePath(*outKeyPath, cert.MarshalPrivateKeyToPEM(caCert.Curve(), rawPriv), 0600); err != nil {
 			return fmt.Errorf("error while writing -out-key: %w", err)
 		}
 	}
-	if err := writePath(*outCertPath, certPEM, 0600, *force); err != nil {
+	if err := writePath(*outCertPath, certPEM, 0600); err != nil {
+		// The cert failed to write after the private key landed on disk. Remove the
+		// freshly written key so a secret is never left behind without its cert.
+		if *inPubPath == "" && *outKeyPath != stdioPath {
+			_ = os.Remove(*outKeyPath)
+		}
 		return fmt.Errorf("error while writing -out-crt: %w", err)
 	}
 	return nil
@@ -515,6 +515,19 @@ func parseGroups(value string) []string {
 	return groups
 }
 
+func validateInOut(in, out string) error {
+	if in == "" {
+		return fmt.Errorf("-in is required")
+	}
+	if out == "" {
+		return fmt.Errorf("-out is required")
+	}
+	if in != stdioPath && in == out {
+		return fmt.Errorf("-in and -out must be different paths")
+	}
+	return nil
+}
+
 func refuseExisting(path, kind string) error {
 	if path == stdioPath {
 		return nil
@@ -545,21 +558,14 @@ func keyEncrypt(args []string) error {
 	in := fs.String("in", "", "Required: plaintext CA/signing private key path, or - for stdin")
 	out := fs.String("out", "", "Required: encrypted CA/signing private key output path, or - for stdout")
 	password := fs.String("password", "", "Password source: env:NAME or file:PATH")
-	force := fs.Bool("force", false, "Overwrite output file if it exists")
 	argonMemory := fs.Uint("argon-memory", 2*1024*1024, "Argon2 memory parameter in KiB")
 	argonParallelism := fs.Uint("argon-parallelism", 4, "Argon2 parallelism parameter")
 	argonIterations := fs.Uint("argon-iterations", 1, "Argon2 iterations parameter")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *in == "" {
-		return fmt.Errorf("-in is required")
-	}
-	if *out == "" {
-		return fmt.Errorf("-out is required")
-	}
-	if *in == stdioPath && *out == stdioPath {
-		return fmt.Errorf("-in and -out cannot both be %q", stdioPath)
+	if err := validateInOut(*in, *out); err != nil {
+		return err
 	}
 
 	raw, err := readPath(*in)
@@ -589,7 +595,7 @@ func keyEncrypt(args []string) error {
 	if err != nil {
 		return fmt.Errorf("error while encrypting key: %w", err)
 	}
-	return writePath(*out, encrypted, 0600, *force)
+	return writePath(*out, encrypted, 0600)
 }
 
 func keyDecrypt(args []string) error {
@@ -598,18 +604,11 @@ func keyDecrypt(args []string) error {
 	in := fs.String("in", "", "Required: encrypted CA/signing private key path, or - for stdin")
 	out := fs.String("out", "", "Required: plaintext CA/signing private key output path, or - for stdout")
 	password := fs.String("password", "", "Password source: env:NAME or file:PATH")
-	force := fs.Bool("force", false, "Overwrite output file if it exists")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *in == "" {
-		return fmt.Errorf("-in is required")
-	}
-	if *out == "" {
-		return fmt.Errorf("-out is required")
-	}
-	if *in == stdioPath && *out == stdioPath {
-		return fmt.Errorf("-in and -out cannot both be %q", stdioPath)
+	if err := validateInOut(*in, *out); err != nil {
+		return err
 	}
 
 	raw, err := readPath(*in)
@@ -627,7 +626,7 @@ func keyDecrypt(args []string) error {
 	if len(bytes.TrimSpace(rest)) != 0 {
 		return fmt.Errorf("input contains trailing data after the first PEM block")
 	}
-	return writePath(*out, cert.MarshalSigningPrivateKeyToPEM(curve, key), 0600, *force)
+	return writePath(*out, cert.MarshalSigningPrivateKeyToPEM(curve, key), 0600)
 }
 
 func keyExport(args []string) error {
@@ -637,18 +636,11 @@ func keyExport(args []string) error {
 	out := fs.String("out", "", "Required: OpenSSH private key output path, or - for stdout")
 	password := fs.String("password", "", "Password source for encrypted CA keys: env:NAME or file:PATH")
 	comment := fs.String("comment", "nebula ca", "OpenSSH private key comment")
-	force := fs.Bool("force", false, "Overwrite output file if it exists")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *in == "" {
-		return fmt.Errorf("-in is required")
-	}
-	if *out == "" {
-		return fmt.Errorf("-out is required")
-	}
-	if *in == stdioPath && *out == stdioPath {
-		return fmt.Errorf("-in and -out cannot both be %q", stdioPath)
+	if err := validateInOut(*in, *out); err != nil {
+		return err
 	}
 
 	raw, err := readPath(*in)
@@ -671,7 +663,7 @@ func keyExport(args []string) error {
 	if err != nil {
 		return fmt.Errorf("error while marshaling OpenSSH private key: %w", err)
 	}
-	return writePath(*out, pem.EncodeToMemory(block), 0600, *force)
+	return writePath(*out, pem.EncodeToMemory(block), 0600)
 }
 
 func certPublic(args []string) error {
@@ -679,18 +671,11 @@ func certPublic(args []string) error {
 	fs.SetOutput(os.Stderr)
 	in := fs.String("in", "", "Required: certificate path, or - for stdin")
 	out := fs.String("out", "", "Required: public key output path, or - for stdout")
-	force := fs.Bool("force", false, "Overwrite output file if it exists")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *in == "" {
-		return fmt.Errorf("-in is required")
-	}
-	if *out == "" {
-		return fmt.Errorf("-out is required")
-	}
-	if *in == stdioPath && *out == stdioPath {
-		return fmt.Errorf("-in and -out cannot both be %q", stdioPath)
+	if err := validateInOut(*in, *out); err != nil {
+		return err
 	}
 
 	raw, err := readPath(*in)
@@ -704,7 +689,7 @@ func certPublic(args []string) error {
 	if len(bytes.TrimSpace(rest)) != 0 {
 		return fmt.Errorf("input contains trailing data after the first PEM block")
 	}
-	return writePath(*out, crt.MarshalPublicKeyPEM(), 0600, *force)
+	return writePath(*out, crt.MarshalPublicKeyPEM(), 0600)
 }
 
 func signingPrivateKeyFromPEM(raw []byte, passwordSource string) ([]byte, cert.Curve, error) {
@@ -921,7 +906,7 @@ func readPath(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-func writePath(path string, data []byte, perm os.FileMode, force bool) error {
+func writePath(path string, data []byte, perm os.FileMode) error {
 	if path == stdioPath {
 		_, err := os.Stdout.Write(data)
 		return err
@@ -929,12 +914,16 @@ func writePath(path string, data []byte, perm os.FileMode, force bool) error {
 	if strings.TrimSpace(path) == "" {
 		return fmt.Errorf("empty output path")
 	}
-	if !force {
-		if _, err := os.Stat(path); err == nil {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		if os.IsExist(err) {
 			return fmt.Errorf("refusing to overwrite existing file: %s", path)
-		} else if !os.IsNotExist(err) {
-			return err
 		}
+		return err
 	}
-	return os.WriteFile(path, data, perm)
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }

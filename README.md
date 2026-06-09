@@ -168,7 +168,7 @@ signing.
 
 - `-in PATH` reads input from `PATH`; use `-` for stdin.
 - `-out PATH` writes output to `PATH`; use `-` for stdout.
-- `-force` overwrites an existing output file.
+- `nebula-tool` refuses to overwrite an existing output file; remove it first.
 - `-password env:NAME` reads a password from an environment variable.
 - `-password file:PATH` reads a password from a file, trimming trailing newlines.
 
