@@ -181,12 +181,38 @@ func signSSHUsage(out io.Writer) {
 	fmt.Fprintln(out, "  -version 1|2")
 }
 
+// leafHelp reports whether a leaf command was invoked with no arguments or an
+// explicit help flag, printing its usage to stdout when so. Callers return nil
+// in that case, making "<command>" and "<command> -h" behave like the parent
+// commands instead of falling through to flag-validation errors.
+func leafHelp(args []string, fs *flag.FlagSet, usageLine string) bool {
+	help := len(args) == 0
+	for _, arg := range args {
+		switch arg {
+		case "-h", "-help", "--help", "help":
+			help = true
+		}
+	}
+	if !help {
+		return false
+	}
+	fmt.Fprintln(os.Stdout, usageLine)
+	fmt.Fprintln(os.Stdout, "")
+	fmt.Fprintln(os.Stdout, "Flags:")
+	fs.SetOutput(os.Stdout)
+	fs.PrintDefaults()
+	return true
+}
+
 func keyPublic(args []string) error {
 	fs := flag.NewFlagSet("key public", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	in := fs.String("in", "", "Required: private key path, or - for stdin")
 	out := fs.String("out", "", "Required: public key output path, or - for stdout")
 	password := fs.String("password", "", "Password source for encrypted CA keys: env:NAME or file:PATH")
+	if leafHelp(args, fs, "Usage: nebula-tool key public [flags]") {
+		return nil
+	}
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -561,6 +587,9 @@ func keyEncrypt(args []string) error {
 	argonMemory := fs.Uint("argon-memory", 2*1024*1024, "Argon2 memory parameter in KiB")
 	argonParallelism := fs.Uint("argon-parallelism", 4, "Argon2 parallelism parameter")
 	argonIterations := fs.Uint("argon-iterations", 1, "Argon2 iterations parameter")
+	if leafHelp(args, fs, "Usage: nebula-tool key encrypt [flags]") {
+		return nil
+	}
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -604,6 +633,9 @@ func keyDecrypt(args []string) error {
 	in := fs.String("in", "", "Required: encrypted CA/signing private key path, or - for stdin")
 	out := fs.String("out", "", "Required: plaintext CA/signing private key output path, or - for stdout")
 	password := fs.String("password", "", "Password source: env:NAME or file:PATH")
+	if leafHelp(args, fs, "Usage: nebula-tool key decrypt [flags]") {
+		return nil
+	}
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -636,6 +668,9 @@ func keyExport(args []string) error {
 	out := fs.String("out", "", "Required: OpenSSH private key output path, or - for stdout")
 	password := fs.String("password", "", "Password source for encrypted CA keys: env:NAME or file:PATH")
 	comment := fs.String("comment", "nebula ca", "OpenSSH private key comment")
+	if leafHelp(args, fs, "Usage: nebula-tool key export [flags]") {
+		return nil
+	}
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -671,6 +706,9 @@ func certPublic(args []string) error {
 	fs.SetOutput(os.Stderr)
 	in := fs.String("in", "", "Required: certificate path, or - for stdin")
 	out := fs.String("out", "", "Required: public key output path, or - for stdout")
+	if leafHelp(args, fs, "Usage: nebula-tool cert public [flags]") {
+		return nil
+	}
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
