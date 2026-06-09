@@ -1,4 +1,5 @@
 /nebula-tool
 /bin/
 /dist/
+/testdata-local/
 *.test

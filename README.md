@@ -8,6 +8,8 @@ It can:
 - derive a public key from a Nebula private key
 - extract a public key from a Nebula certificate
 - encrypt and decrypt Nebula CA/signing private keys
+- export an Ed25519 Nebula CA/signing key as an OpenSSH private key
+- sign Nebula host certificates through `ssh-agent`
 
 The tool links against `github.com/slackhq/nebula/cert`, so Nebula's own key,
 certificate, PEM, and CA key encryption formats are used directly.
@@ -36,6 +38,25 @@ Decrypt an encrypted CA key:
 
 ```bash
 nebula-tool key decrypt -in ca.enc.key -out ca.key
+```
+
+Export an Ed25519 CA key for use with `ssh-agent`:
+
+```bash
+nebula-tool key export -in ca.key -out ca.ssh.key
+ssh-add ca.ssh.key
+```
+
+Test SSH agent access for a Nebula CA certificate:
+
+```bash
+nebula-tool sign ssh -test -ca-crt ca.crt
+```
+
+Sign a host certificate through `ssh-agent`:
+
+```bash
+nebula-tool sign ssh -ca-crt ca.crt -name host1 -networks 10.10.10.1/24 -out-key host1.key -out-crt host1.crt
 ```
 
 If `-password` is omitted and stdin is a terminal, `nebula-tool` prompts without
@@ -86,6 +107,62 @@ nebula-tool key decrypt -in ca.enc.key -out ca.key
 nebula-tool key decrypt -in ca.enc.key -out ca.key -password env:NEBULA_CA_PASSWORD
 nebula-tool key decrypt -in ca.enc.key -out ca.key -password file:/run/secrets/nebula-ca-password
 ```
+
+### `key export`
+
+Export an Ed25519 Nebula CA/signing key as an OpenSSH private key:
+
+```bash
+nebula-tool key export -in ca.key -out ca.ssh.key
+nebula-tool key export -in ca.enc.key -out ca.ssh.key -password env:NEBULA_CA_PASSWORD
+```
+
+Only Ed25519 CA/signing keys are supported. Host keys and P-256 CA keys are
+rejected.
+
+### `sign ssh`
+
+Sign a Nebula host certificate using an Ed25519 CA key available through
+`ssh-agent`:
+
+```bash
+nebula-tool sign ssh \
+  -ca-crt ca.crt \
+  -name host1 \
+  -networks 10.10.10.1/24 \
+  -out-key host1.key \
+  -out-crt host1.crt
+```
+
+Use an existing host public key:
+
+```bash
+nebula-tool sign ssh \
+  -ca-crt ca.crt \
+  -name host1 \
+  -networks 10.10.10.1/24 \
+  -in-pub host1.pub \
+  -out-crt host1.crt
+```
+
+Test agent access without creating a certificate:
+
+```bash
+nebula-tool sign ssh -test -ca-crt ca.crt
+```
+
+By default the agent socket is read from `SSH_AUTH_SOCK`. Override it with:
+
+```bash
+nebula-tool sign ssh -test -ca-crt ca.crt -agent-sock /path/to/agent.sock
+```
+
+Supported signing flags mirror the common `nebula-cert sign` flags: `-version`,
+`-ca-crt`, `-name`, `-networks`, `-unsafe-networks`, `-duration`, `-groups`,
+`-in-pub`, `-out-key`, and `-out-crt`.
+
+Only Ed25519 Nebula CA certificates are currently supported for SSH agent
+signing.
 
 ## Common Flags
 
