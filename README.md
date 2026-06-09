@@ -9,8 +9,8 @@ handling that `nebula-cert` does not cover directly. Its primary uses are:
 
 It also handles a few smaller key and certificate chores:
 
-- export an Ed25519 Nebula CA/signing key as an OpenSSH private key (to load
-  into `ssh-agent` for the signing workflow above)
+- export a Nebula CA/signing key (Ed25519 or P256) as an OpenSSH private key
+  (to load into `ssh-agent` for the signing workflow above)
 - derive a public key from a Nebula private key
 - extract a public key from a Nebula certificate
 
@@ -61,8 +61,8 @@ nebula-tool -version
 
 ### `sign ssh`
 
-Sign a Nebula host certificate using an Ed25519 CA key available through
-`ssh-agent`:
+Sign a Nebula host certificate using a CA key available through `ssh-agent`,
+on either an Ed25519 (`ssh-ed25519`) or P256 (`ecdsa-sha2-nistp256`) CA:
 
 ```bash
 nebula-tool sign ssh \
@@ -100,8 +100,10 @@ Supported signing flags mirror the common `nebula-cert sign` flags: `-version`,
 `-ca-crt`, `-name`, `-networks`, `-unsafe-networks`, `-duration`, `-groups`,
 `-in-pub`, `-out-key`, and `-out-crt`.
 
-Only Ed25519 Nebula CA certificates are currently supported for SSH agent
-signing.
+Both Ed25519 and P256 Nebula CA certificates are supported. The host keypair
+is generated on the CA's curve, an Ed25519 CA signs through the agent's
+`ssh-ed25519` key, and a P256 CA through its `ecdsa-sha2-nistp256` key. Use
+`key export` to load either CA key into `ssh-agent`.
 
 ### `key encrypt`
 
@@ -125,15 +127,15 @@ nebula-tool key decrypt -in ca.enc.key -out ca.key -password file:/run/secrets/n
 
 ### `key export`
 
-Export an Ed25519 Nebula CA/signing key as an OpenSSH private key:
+Export a Nebula CA/signing key as an OpenSSH private key. Ed25519 keys export
+as `ssh-ed25519`, P256 keys as `ecdsa-sha2-nistp256`:
 
 ```bash
 nebula-tool key export -in ca.key -out ca.ssh.key
 nebula-tool key export -in ca.enc.key -out ca.ssh.key -password env:NEBULA_CA_PASSWORD
 ```
 
-Only Ed25519 CA/signing keys are supported. Host keys and P-256 CA keys are
-rejected.
+Only CA/signing keys are supported; host (`pki.key`) keys are rejected.
 
 ### `key public`
 

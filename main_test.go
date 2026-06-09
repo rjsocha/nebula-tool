@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/slackhq/nebula/cert"
+	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
 
@@ -322,17 +323,38 @@ func TestKeyExport(t *testing.T) {
 		}
 	})
 
-	t.Run("p256 ca rejected", func(t *testing.T) {
+	t.Run("p256 ok", func(t *testing.T) {
 		k, err := ecdh.P256().GenerateKey(rand.Reader)
 		if err != nil {
 			t.Fatal(err)
 		}
+		scalar := k.Bytes()
 		in := filepath.Join(dir, "p256.key")
-		if err := os.WriteFile(in, cert.MarshalSigningPrivateKeyToPEM(cert.Curve_P256, k.Bytes()), 0600); err != nil {
+		out := filepath.Join(dir, "p256.ssh.key")
+		if err := os.WriteFile(in, cert.MarshalSigningPrivateKeyToPEM(cert.Curve_P256, scalar), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := runCapture(t, nil, "key", "export", "-in", in, "-out", filepath.Join(dir, "y")); err == nil {
-			t.Fatal("exporting a P256 CA key should be refused")
+		if _, err := runCapture(t, nil, "key", "export", "-in", in, "-out", out); err != nil {
+			t.Fatalf("export failed: %v", err)
+		}
+		parsed, err := ssh.ParseRawPrivateKey(mustRead(t, out))
+		if err != nil {
+			t.Fatalf("exported key is not a valid OpenSSH private key: %v", err)
+		}
+		ecPriv, ok := parsed.(*ecdsa.PrivateKey)
+		if !ok {
+			t.Fatalf("exported key is %T, want *ecdsa.PrivateKey", parsed)
+		}
+		if ecPriv.Curve != elliptic.P256() {
+			t.Fatalf("exported key curve = %v, want P256", ecPriv.Curve)
+		}
+		wantPub, err := deriveSigningPublic(cert.Curve_P256, scalar)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gotPub := elliptic.Marshal(elliptic.P256(), ecPriv.X, ecPriv.Y)
+		if !bytes.Equal(gotPub, wantPub) {
+			t.Fatal("exported OpenSSH key public point does not match the CA key")
 		}
 	})
 }
@@ -493,15 +515,77 @@ func TestSignSSHWithInPub(t *testing.T) {
 	}
 }
 
-func TestSignSSHRejectsP256CA(t *testing.T) {
+func TestSignSSHP256(t *testing.T) {
+	for _, version := range []cert.Version{cert.Version1, cert.Version2} {
+		version := version
+		t.Run(versionName(version), func(t *testing.T) {
+			dir := t.TempDir()
+			caPEM, caPriv := newP256CA(t, version)
+			caCrt := filepath.Join(dir, "ca.crt")
+			if err := os.WriteFile(caCrt, caPEM, 0600); err != nil {
+				t.Fatal(err)
+			}
+			sock := startAgent(t, caPriv)
+
+			outKey := filepath.Join(dir, "host.key")
+			outCrt := filepath.Join(dir, "host.crt")
+			if _, err := runCapture(t, nil, "sign", "ssh",
+				"-agent-sock", sock, "-ca-crt", caCrt,
+				"-name", "host1", "-networks", "10.10.10.1/24",
+				"-out-key", outKey, "-out-crt", outCrt); err != nil {
+				t.Fatalf("sign ssh failed: %v", err)
+			}
+
+			crt, _, err := cert.UnmarshalCertificateFromPEM(mustRead(t, outCrt))
+			if err != nil {
+				t.Fatal(err)
+			}
+			caCert, _, err := cert.UnmarshalCertificateFromPEM(caPEM)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !crt.CheckSignature(caCert.PublicKey()) {
+				t.Fatal("produced cert does not verify against P256 CA")
+			}
+			if crt.Curve() != cert.Curve_P256 {
+				t.Fatalf("host cert curve = %v, want P256", crt.Curve())
+			}
+			key, _, curve, err := cert.UnmarshalPrivateKeyFromPEM(mustRead(t, outKey))
+			if err != nil {
+				t.Fatal(err)
+			}
+			derivedPub, err := deriveHostPublic(curve, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(derivedPub, crt.PublicKey()) {
+				t.Fatal("cert public key does not match generated private key")
+			}
+		})
+	}
+}
+
+func TestSignSSHP256TestMode(t *testing.T) {
 	dir := t.TempDir()
-	caPEM := newP256CA(t)
+	caPEM, caPriv := newP256CA(t, cert.Version2)
 	caCrt := filepath.Join(dir, "ca.crt")
 	if err := os.WriteFile(caCrt, caPEM, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runCapture(t, nil, "sign", "ssh", "-test", "-ca-crt", caCrt); err == nil {
-		t.Fatal("sign ssh should reject a P256 CA")
+	sock := startAgent(t, caPriv)
+
+	if _, err := runCapture(t, nil, "sign", "ssh", "-test", "-agent-sock", sock, "-ca-crt", caCrt); err != nil {
+		t.Fatalf("sign ssh -test failed: %v", err)
+	}
+
+	// an agent without the matching P256 key must fail
+	otherPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherSock := startAgent(t, otherPriv)
+	if _, err := runCapture(t, nil, "sign", "ssh", "-test", "-agent-sock", otherSock, "-ca-crt", caCrt); err == nil {
+		t.Fatal("test mode should fail when agent lacks the CA key")
 	}
 }
 
@@ -533,7 +617,7 @@ func newEd25519CA(t *testing.T, version cert.Version) ([]byte, ed25519.PrivateKe
 	return pem, priv
 }
 
-func newP256CA(t *testing.T) []byte {
+func newP256CA(t *testing.T, version cert.Version) ([]byte, *ecdsa.PrivateKey) {
 	t.Helper()
 	privk, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -543,7 +627,7 @@ func newP256CA(t *testing.T) []byte {
 	priv := privk.D.FillBytes(make([]byte, 32))
 	tbs := &cert.TBSCertificate{
 		Curve:     cert.Curve_P256,
-		Version:   cert.Version2,
+		Version:   version,
 		Name:      "test ca p256",
 		NotBefore: time.Now().Add(-time.Hour).Round(time.Second),
 		NotAfter:  time.Now().Add(time.Hour).Round(time.Second),
@@ -558,7 +642,7 @@ func newP256CA(t *testing.T) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return pem
+	return pem, privk
 }
 
 // signHostCert produces a host key + cert via the CLI and returns their paths.
@@ -579,8 +663,9 @@ func signHostCert(t *testing.T, dir string, caPEM []byte, caPriv ed25519.Private
 }
 
 // startAgent serves an in-process ssh-agent holding the given keys over a unix
-// socket and returns the socket path.
-func startAgent(t *testing.T, keys ...ed25519.PrivateKey) string {
+// socket and returns the socket path. Keys may be any type ssh-agent accepts
+// (e.g. ed25519.PrivateKey, *ecdsa.PrivateKey).
+func startAgent(t *testing.T, keys ...any) string {
 	t.Helper()
 	dir := t.TempDir()
 	sock := filepath.Join(dir, "a.sock")

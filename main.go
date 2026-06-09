@@ -2,15 +2,21 @@ package main
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/ecdh"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/asn1"
 	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"math"
+	"math/big"
 	"net"
 	"net/netip"
 	"os"
@@ -269,8 +275,10 @@ func signSSH(args []string) error {
 	if err != nil {
 		return err
 	}
-	if caCert.Curve() != cert.Curve_CURVE25519 {
-		return fmt.Errorf("ssh-agent signing currently supports only Ed25519 Nebula CA certificates")
+	switch caCert.Curve() {
+	case cert.Curve_CURVE25519, cert.Curve_P256:
+	default:
+		return fmt.Errorf("ssh-agent signing supports only Ed25519 and P256 Nebula CA certificates")
 	}
 
 	signer, agentKey, sshPub, closeAgent, err := sshAgentSignerForCA(caCert, *agentSock)
@@ -349,7 +357,7 @@ func signSSH(args []string) error {
 			return fmt.Errorf("curve of -in-pub does not match ca")
 		}
 	} else {
-		pub, rawPriv, err = x25519Keypair()
+		pub, rawPriv, err = hostKeypair(caCert.Curve())
 		if err != nil {
 			return err
 		}
@@ -448,9 +456,9 @@ func readCACert(path string) (cert.Certificate, error) {
 }
 
 func sshAgentSignerForCA(caCert cert.Certificate, agentSock string) (cert.SignerLambda, *agent.Key, ssh.PublicKey, func(), error) {
-	sshPub, err := ssh.NewPublicKey(ed25519.PublicKey(caCert.PublicKey()))
+	sshPub, err := caSSHPublicKey(caCert)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("error converting CA public key to SSH format: %w", err)
+		return nil, nil, nil, nil, err
 	}
 
 	agentClient, conn, err := sshAgentClient(agentSock)
@@ -476,17 +484,69 @@ func sshAgentSignerForCA(caCert cert.Certificate, agentSock string) (cert.Signer
 		return nil, nil, nil, nil, fmt.Errorf("ssh-agent does not have the key matching CA certificate public key %s", ssh.FingerprintSHA256(sshPub))
 	}
 
+	curve := caCert.Curve()
 	signer := func(certBytes []byte) ([]byte, error) {
 		sig, err := agentClient.Sign(agentKey, certBytes)
 		if err != nil {
 			return nil, fmt.Errorf("ssh-agent signing failed: %w", err)
 		}
+		return nebulaSignatureFromSSH(curve, sig)
+	}
+	return signer, agentKey, sshPub, closeAgent, nil
+}
+
+// caSSHPublicKey converts a Nebula CA certificate's public key into the SSH
+// public key the matching ssh-agent identity is expected to expose.
+func caSSHPublicKey(caCert cert.Certificate) (ssh.PublicKey, error) {
+	switch caCert.Curve() {
+	case cert.Curve_CURVE25519:
+		sshPub, err := ssh.NewPublicKey(ed25519.PublicKey(caCert.PublicKey()))
+		if err != nil {
+			return nil, fmt.Errorf("error converting CA public key to SSH format: %w", err)
+		}
+		return sshPub, nil
+	case cert.Curve_P256:
+		ecPub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), caCert.PublicKey())
+		if err != nil {
+			return nil, fmt.Errorf("error parsing P256 CA public key: %w", err)
+		}
+		sshPub, err := ssh.NewPublicKey(ecPub)
+		if err != nil {
+			return nil, fmt.Errorf("error converting CA public key to SSH format: %w", err)
+		}
+		return sshPub, nil
+	default:
+		return nil, fmt.Errorf("unsupported CA curve: %s", caCert.Curve())
+	}
+}
+
+// nebulaSignatureFromSSH translates an ssh-agent signature into the raw
+// signature bytes Nebula embeds in a certificate for the CA's curve. Ed25519
+// signatures are used verbatim; ECDSA signatures arrive as an SSH (r, s) pair
+// and must be re-encoded as the ASN.1 DER that Nebula's ecdsa.VerifyASN1 expects.
+func nebulaSignatureFromSSH(curve cert.Curve, sig *ssh.Signature) ([]byte, error) {
+	switch curve {
+	case cert.Curve_CURVE25519:
 		if sig.Format != ssh.KeyAlgoED25519 {
 			return nil, fmt.Errorf("unexpected ssh signature format: %s", sig.Format)
 		}
 		return sig.Blob, nil
+	case cert.Curve_P256:
+		if sig.Format != ssh.KeyAlgoECDSA256 {
+			return nil, fmt.Errorf("unexpected ssh signature format: %s", sig.Format)
+		}
+		var parsed struct{ R, S *big.Int }
+		if err := ssh.Unmarshal(sig.Blob, &parsed); err != nil {
+			return nil, fmt.Errorf("error parsing ECDSA ssh signature: %w", err)
+		}
+		der, err := asn1.Marshal(struct{ R, S *big.Int }{parsed.R, parsed.S})
+		if err != nil {
+			return nil, fmt.Errorf("error encoding ECDSA signature: %w", err)
+		}
+		return der, nil
+	default:
+		return nil, fmt.Errorf("unsupported CA curve: %s", curve)
 	}
-	return signer, agentKey, sshPub, closeAgent, nil
 }
 
 func signSSHTest(caCert cert.Certificate, signer cert.SignerLambda, agentKey *agent.Key, sshPub ssh.PublicKey) error {
@@ -495,12 +555,34 @@ func signSSHTest(caCert cert.Certificate, signer cert.SignerLambda, agentKey *ag
 	if err != nil {
 		return err
 	}
-	if !ed25519.Verify(ed25519.PublicKey(caCert.PublicKey()), testData, sig) {
+	ok, err := verifyCASignature(caCert, testData, sig)
+	if err != nil {
+		return err
+	}
+	if !ok {
 		return fmt.Errorf("ssh-agent signature did not verify against CA certificate public key")
 	}
 
 	fmt.Printf("ok ssh-agent key=%s comment=%q signature=%d bytes\n", ssh.FingerprintSHA256(sshPub), agentKey.Comment, len(sig))
 	return nil
+}
+
+// verifyCASignature verifies a signature produced by the ssh-agent signer
+// (already in Nebula's on-cert encoding) against the CA's public key.
+func verifyCASignature(caCert cert.Certificate, msg, sig []byte) (bool, error) {
+	switch caCert.Curve() {
+	case cert.Curve_CURVE25519:
+		return ed25519.Verify(ed25519.PublicKey(caCert.PublicKey()), msg, sig), nil
+	case cert.Curve_P256:
+		ecPub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), caCert.PublicKey())
+		if err != nil {
+			return false, fmt.Errorf("error parsing P256 CA public key: %w", err)
+		}
+		hashed := sha256.Sum256(msg)
+		return ecdsa.VerifyASN1(ecPub, hashed[:], sig), nil
+	default:
+		return false, fmt.Errorf("unsupported CA curve: %s", caCert.Curve())
+	}
 }
 
 func parseNetworkFlag(flagName, value string) ([]netip.Prefix, []netip.Prefix, error) {
@@ -566,6 +648,19 @@ func refuseExisting(path, kind string) error {
 	return nil
 }
 
+// hostKeypair generates a host keypair on the same curve as the signing CA, so
+// the produced certificate's key matches its curve field.
+func hostKeypair(curve cert.Curve) ([]byte, []byte, error) {
+	switch curve {
+	case cert.Curve_CURVE25519:
+		return x25519Keypair()
+	case cert.Curve_P256:
+		return p256Keypair()
+	default:
+		return nil, nil, fmt.Errorf("invalid curve: %s", curve)
+	}
+}
+
 func x25519Keypair() ([]byte, []byte, error) {
 	priv := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, priv); err != nil {
@@ -576,6 +671,14 @@ func x25519Keypair() ([]byte, []byte, error) {
 		return nil, nil, fmt.Errorf("error while generating public key: %w", err)
 	}
 	return pub, priv, nil
+}
+
+func p256Keypair() ([]byte, []byte, error) {
+	priv, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error while generating private key: %w", err)
+	}
+	return priv.PublicKey().Bytes(), priv.Bytes(), nil
 }
 
 func keyEncrypt(args []string) error {
@@ -687,18 +790,37 @@ func keyExport(args []string) error {
 	if err != nil {
 		return err
 	}
-	if curve != cert.Curve_CURVE25519 {
-		return fmt.Errorf("only Ed25519 CA/signing keys can be exported to OpenSSH private key format")
-	}
-	if len(key) != ed25519.PrivateKeySize {
-		return fmt.Errorf("invalid Ed25519 private key")
+	signer, err := opensshKeyFromSigningKey(curve, key)
+	if err != nil {
+		return err
 	}
 
-	block, err := ssh.MarshalPrivateKey(ed25519.PrivateKey(key), *comment)
+	block, err := ssh.MarshalPrivateKey(signer, *comment)
 	if err != nil {
 		return fmt.Errorf("error while marshaling OpenSSH private key: %w", err)
 	}
 	return writePath(*out, pem.EncodeToMemory(block), 0600)
+}
+
+// opensshKeyFromSigningKey turns a raw Nebula CA/signing private key into the
+// crypto key type OpenSSH understands: ed25519.PrivateKey for Curve25519 and
+// *ecdsa.PrivateKey (ecdsa-sha2-nistp256) for P256.
+func opensshKeyFromSigningKey(curve cert.Curve, key []byte) (crypto.PrivateKey, error) {
+	switch curve {
+	case cert.Curve_CURVE25519:
+		if len(key) != ed25519.PrivateKeySize {
+			return nil, fmt.Errorf("invalid Ed25519 private key")
+		}
+		return ed25519.PrivateKey(key), nil
+	case cert.Curve_P256:
+		ecPriv, err := ecdsa.ParseRawPrivateKey(elliptic.P256(), key)
+		if err != nil {
+			return nil, fmt.Errorf("invalid P256 private key: %w", err)
+		}
+		return ecPriv, nil
+	default:
+		return nil, fmt.Errorf("only Ed25519 and P256 CA/signing keys can be exported to OpenSSH private key format")
+	}
 }
 
 func certPublic(args []string) error {
