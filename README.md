@@ -1,62 +1,52 @@
 # nebula-tool
 
-`nebula-tool` is a small CLI for day-to-day Nebula key and certificate tasks
-that are useful operationally but not exposed directly by `nebula-cert`.
+`nebula-tool` is a small CLI that fills operational gaps around Nebula CA key
+handling that `nebula-cert` does not cover directly. Its primary uses are:
 
-It can:
+- **sign Nebula host certificates through `ssh-agent`**, so the CA private key
+  can live in an agent (or a hardware token behind it) and never touch disk
+- **encrypt and decrypt Nebula CA/signing private keys** at rest
 
+It also handles a few smaller key and certificate chores:
+
+- export an Ed25519 Nebula CA/signing key as an OpenSSH private key (to load
+  into `ssh-agent` for the signing workflow above)
 - derive a public key from a Nebula private key
 - extract a public key from a Nebula certificate
-- encrypt and decrypt Nebula CA/signing private keys
-- export an Ed25519 Nebula CA/signing key as an OpenSSH private key
-- sign Nebula host certificates through `ssh-agent`
 
 The tool links against `github.com/slackhq/nebula/cert`, so Nebula's own key,
 certificate, PEM, and CA key encryption formats are used directly.
 
 ## Quick Start
 
-Derive a host public key from a host private key:
-
-```bash
-nebula-tool key public -in host.key -out host.pub
-```
-
-Extract a public key from a certificate:
-
-```bash
-nebula-tool cert public -in host.crt -out host.pub
-```
-
-Encrypt a plaintext CA key:
-
-```bash
-nebula-tool key encrypt -in ca.key -out ca.enc.key
-```
-
-Decrypt an encrypted CA key:
-
-```bash
-nebula-tool key decrypt -in ca.enc.key -out ca.key
-```
-
-Export an Ed25519 CA key for use with `ssh-agent`:
+Load an Ed25519 CA key into `ssh-agent`, then sign a host certificate without
+the CA key ever being read from disk:
 
 ```bash
 nebula-tool key export -in ca.key -out ca.ssh.key
 ssh-add ca.ssh.key
+nebula-tool sign ssh -ca-crt ca.crt -name host1 -networks 10.10.10.1/24 -out-key host1.key -out-crt host1.crt
 ```
 
-Test SSH agent access for a Nebula CA certificate:
+Test that the agent holds the right key before signing:
 
 ```bash
 nebula-tool sign ssh -test -ca-crt ca.crt
 ```
 
-Sign a host certificate through `ssh-agent`:
+Encrypt a plaintext CA key at rest, and decrypt it when needed:
 
 ```bash
-nebula-tool sign ssh -ca-crt ca.crt -name host1 -networks 10.10.10.1/24 -out-key host1.key -out-crt host1.crt
+nebula-tool key encrypt -in ca.key -out ca.enc.key
+nebula-tool key decrypt -in ca.enc.key -out ca.key
+```
+
+Smaller helpers, derive a public key from a private key, or extract one from a
+certificate:
+
+```bash
+nebula-tool key public -in host.key -out host.pub
+nebula-tool cert public -in host.crt -out host.pub
 ```
 
 If `-password` is omitted and stdin is a terminal, `nebula-tool` prompts without
@@ -68,57 +58,6 @@ echo. Encryption asks for confirmation; decryption asks once.
 nebula-tool -help
 nebula-tool -version
 ```
-
-### `key public`
-
-Derive a public key from a private key:
-
-```bash
-nebula-tool key public -in host.key -out host.pub
-nebula-tool key public -in ca.key -out ca.pub
-nebula-tool key public -in ca.enc.key -out ca.pub -password env:NEBULA_CA_PASSWORD
-```
-
-### `cert public`
-
-Extract a public key from a Nebula certificate:
-
-```bash
-nebula-tool cert public -in host.crt -out host.pub
-nebula-tool cert public -in ca.crt -out ca.pub
-```
-
-### `key encrypt`
-
-Encrypt a plaintext Nebula CA/signing key:
-
-```bash
-nebula-tool key encrypt -in ca.key -out ca.enc.key
-nebula-tool key encrypt -in ca.key -out ca.enc.key -password env:NEBULA_CA_PASSWORD
-nebula-tool key encrypt -in ca.key -out ca.enc.key -password file:/run/secrets/nebula-ca-password
-```
-
-### `key decrypt`
-
-Decrypt an encrypted Nebula CA/signing key:
-
-```bash
-nebula-tool key decrypt -in ca.enc.key -out ca.key
-nebula-tool key decrypt -in ca.enc.key -out ca.key -password env:NEBULA_CA_PASSWORD
-nebula-tool key decrypt -in ca.enc.key -out ca.key -password file:/run/secrets/nebula-ca-password
-```
-
-### `key export`
-
-Export an Ed25519 Nebula CA/signing key as an OpenSSH private key:
-
-```bash
-nebula-tool key export -in ca.key -out ca.ssh.key
-nebula-tool key export -in ca.enc.key -out ca.ssh.key -password env:NEBULA_CA_PASSWORD
-```
-
-Only Ed25519 CA/signing keys are supported. Host keys and P-256 CA keys are
-rejected.
 
 ### `sign ssh`
 
@@ -163,6 +102,57 @@ Supported signing flags mirror the common `nebula-cert sign` flags: `-version`,
 
 Only Ed25519 Nebula CA certificates are currently supported for SSH agent
 signing.
+
+### `key encrypt`
+
+Encrypt a plaintext Nebula CA/signing key:
+
+```bash
+nebula-tool key encrypt -in ca.key -out ca.enc.key
+nebula-tool key encrypt -in ca.key -out ca.enc.key -password env:NEBULA_CA_PASSWORD
+nebula-tool key encrypt -in ca.key -out ca.enc.key -password file:/run/secrets/nebula-ca-password
+```
+
+### `key decrypt`
+
+Decrypt an encrypted Nebula CA/signing key:
+
+```bash
+nebula-tool key decrypt -in ca.enc.key -out ca.key
+nebula-tool key decrypt -in ca.enc.key -out ca.key -password env:NEBULA_CA_PASSWORD
+nebula-tool key decrypt -in ca.enc.key -out ca.key -password file:/run/secrets/nebula-ca-password
+```
+
+### `key export`
+
+Export an Ed25519 Nebula CA/signing key as an OpenSSH private key:
+
+```bash
+nebula-tool key export -in ca.key -out ca.ssh.key
+nebula-tool key export -in ca.enc.key -out ca.ssh.key -password env:NEBULA_CA_PASSWORD
+```
+
+Only Ed25519 CA/signing keys are supported. Host keys and P-256 CA keys are
+rejected.
+
+### `key public`
+
+Derive a public key from a private key:
+
+```bash
+nebula-tool key public -in host.key -out host.pub
+nebula-tool key public -in ca.key -out ca.pub
+nebula-tool key public -in ca.enc.key -out ca.pub -password env:NEBULA_CA_PASSWORD
+```
+
+### `cert public`
+
+Extract a public key from a Nebula certificate:
+
+```bash
+nebula-tool cert public -in host.crt -out host.pub
+nebula-tool cert public -in ca.crt -out ca.pub
+```
 
 ## Common Flags
 
