@@ -3,8 +3,8 @@
 `nebula-tool` is a small CLI that fills operational gaps around Nebula CA key
 handling that `nebula-cert` does not cover directly. Its primary uses are:
 
-- **sign Nebula host certificates through `ssh-agent`**, so the CA private key
-  can live in an agent (or a hardware token behind it) and never touch disk
+- **sign Nebula host certificates through `ssh-agent`**, so the CA private key is
+  supplied by the agent at signing time and is not read from disk
 - **encrypt and decrypt Nebula CA/signing private keys** at rest
 
 It also handles a few smaller key and certificate chores:
@@ -179,6 +179,31 @@ decrypted with this tool:
 - `NEBULA ECDSA P256 PRIVATE KEY`
 - `NEBULA ED25519 ENCRYPTED PRIVATE KEY`
 - `NEBULA ECDSA P256 ENCRYPTED PRIVATE KEY`
+
+## Hardware-Backed Keys
+
+`nebula-tool` is agnostic to where the CA key lives. It signs through whatever
+identity `ssh-agent` exposes, as long as that identity is a standard
+`ssh-ed25519` or `ecdsa-sha2-nistp256` key and the agent returns a standard
+signature. A hardware token works today provided it presents such a key, for
+example a YubiKey OpenPGP applet via `gpg-agent`. The key must have been
+imported onto the token after its `ca.crt` was created in software: the tool
+has no command to create a CA certificate, so a key generated on the device and
+never extractable cannot bootstrap its own `ca.crt` here. The tool has no
+token-specific code of its own, and the supported key types are exactly those
+Nebula itself uses.
+
+FIDO2 security-key identities (`sk-ssh-ed25519@openssh.com`,
+`sk-ecdsa-sha2-nistp256@openssh.com`) are **not** supported. Their signatures
+carry a FIDO envelope (flags and counter) instead of a plain signature over the
+certificate, so they never match Nebula's verification, and the agent-key
+lookup reports no matching key.
+
+Native FIDO support is a plausible future direction but is out of scope for
+this tool: it would require extending Nebula's certificate format and
+verification in upstream `slackhq/nebula`, not changes here. A separate,
+PKCS#11-backed CA signing path already exists in upstream `nebula-cert`
+(P256 only).
 
 ## Build
 
