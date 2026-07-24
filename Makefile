@@ -1,5 +1,5 @@
 GO ?= go
-NEBULA_VERSION ?= v1.10.3
+NEBULA_VERSION ?= v1.11.0
 BINARY ?= nebula-tool
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
